@@ -6,7 +6,7 @@ import json
 import sqlite3
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
@@ -889,10 +889,97 @@ def recommend(user_id, filter_following):
     - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
+    if not user_id:
+        return []
+    
+    # Step 1: Get posts the user has positively reacted to
+    positive_reactions = ['like', 'love', 'laugh'] 
+    liked_posts = query_db('''
+        SELECT DISTINCT p.id, p.content 
+        FROM posts p 
+        JOIN reactions r ON p.id = r.post_id 
+        WHERE r.user_id = ? AND r.reaction_type IN (?, ?, ?)
+    ''', (user_id, positive_reactions[0], positive_reactions[1], positive_reactions[2]))
 
-    recommended_posts = {} 
+    if not liked_posts:
+        return get_fallback_posts(user_id, filter_following, 5)
+    
+    # Step 2: Extract keywords from liked posts
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being'}
+    word_freq = collections.Counter()
+    
+    for post in liked_posts:
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', post['content'].lower())
+        filtered_words = [word for word in words if word not in stop_words]
+        word_freq.update(filtered_words)
 
-    return recommended_posts
+    top_keywords = [word for word, _ in word_freq.most_common(10)]
+    
+    if not top_keywords:
+        return get_fallback_posts(user_id, filter_following, 5)
+    
+    # Step 3: Find posts that match these keywords
+    base_query = '''
+        SELECT DISTINCT p.id, p.content, p.created_at, u.username, u.id as user_id
+        FROM posts p 
+        JOIN users u ON p.user_id = u.id
+        WHERE p.user_id != ? 
+    '''
+    params = [user_id]
+
+    if filter_following:
+        base_query += ' AND p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)'
+        params.append(user_id)
+    
+    keyword_conditions = []
+    for keyword in top_keywords:
+        keyword_conditions.append('p.content LIKE ?')
+        params.append(f'%{keyword}%')
+    
+    if keyword_conditions:
+        base_query += ' AND (' + ' OR '.join(keyword_conditions) + ')'
+    
+    base_query += ' AND p.id NOT IN (SELECT post_id FROM reactions WHERE user_id = ?)'
+    params.append(user_id)
+    
+    base_query += ' ORDER BY p.created_at DESC LIMIT 10'
+    
+    candidate_posts = query_db(base_query, tuple(params))
+    
+    # If we have enough posts, return them, if not supplement until enough
+    if len(candidate_posts) >= 5:
+        return candidate_posts[:5]
+    
+    if candidate_posts:
+        needed = 5 - len(candidate_posts)
+        supplemental = get_fallback_posts(user_id, filter_following, needed, exclude_ids=[p['id'] for p in candidate_posts])
+        return list(candidate_posts) + supplemental
+    
+    return get_fallback_posts(user_id, filter_following, 5)
+
+def get_fallback_posts(user_id, filter_following, limit, exclude_ids=None):
+    """Get recent posts as fallback when recommendation algorithm doesn't find enough matches."""
+    base_query = '''
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        FROM posts p 
+        JOIN users u ON p.user_id = u.id
+        WHERE p.user_id != ? 
+    '''
+    params = [user_id]
+    
+    if filter_following:
+        base_query += ' AND p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)'
+        params.append(user_id)
+    
+    if exclude_ids:
+        placeholders = ','.join(['?'] * len(exclude_ids))
+        base_query += f' AND p.id NOT IN ({placeholders})'
+        params.extend(exclude_ids)
+    
+    base_query += ' ORDER BY p.created_at DESC LIMIT ?'
+    params.append(limit)
+    
+    return query_db(base_query, tuple(params))
 
 # Task 3.2
 def user_risk_analysis(user_id):
