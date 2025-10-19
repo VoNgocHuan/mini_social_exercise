@@ -869,7 +869,7 @@ def loop_color(user_id):
 
 # ----- Functions to be implemented are below
 
-# Task 3.1
+# Task 3.3
 def recommend(user_id, filter_following):
     """
     Args:
@@ -892,7 +892,7 @@ def recommend(user_id, filter_following):
 
     recommended_posts = {} 
 
-    return recommended_posts;
+    return recommended_posts
 
 # Task 3.2
 def user_risk_analysis(user_id):
@@ -908,23 +908,130 @@ def user_risk_analysis(user_id):
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    
-    score = 0
+    # step 1: Get user profile and account creation date in day
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
 
-    return score;
+    account_created = user['created_at']
+    if isinstance(account_created, str):
+        account_created = datetime.strptime(account_created, '%Y-%m-%d %H:%M:%S')
+    account_age_days = (datetime.utcnow() - account_created).days
 
+    # step 2: calculate profile score
+    profile_text = user['profile'] or ""
+    _, profile_score = moderate_content(profile_text)
+
+    # step 3: calculate post and comment score and their average
+    posts = query_db('SELECT content, created_at FROM posts WHERE user_id = ?', (user_id,))
+    post_scores = []
+    for post in posts:
+        _, post_score = moderate_content(post['content'])
+        post_scores.append(post_score)
+
+    comments = query_db('SELECT content, created_at FROM comments WHERE user_id = ?', (user_id,))
+    comment_scores = []
+    for comment in comments:
+        _, comment_score = moderate_content(comment['content'])
+        comment_scores.append(comment_score)
+
+    average_post_score = sum(post_scores) / len(post_scores) if post_scores else 0.0
+    average_comment_score = sum(comment_scores) / len(comment_scores) if comment_scores else 0.0
+
+    # step 4: combine scores
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    # additional rule: check for posting and commenting multiple times within very short time windows
+    activity_velocity_risk = 0.0
     
-# Task 3.3
+    all_activities = []
+
+    for post in posts:
+        created_at = post['created_at']
+        if isinstance(created_at, str):
+            created_at = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+        all_activities.append(created_at)
+    
+    for comment in comments:
+        created_at = comment['created_at']
+        if isinstance(created_at, str):
+            created_at = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+        all_activities.append(created_at)
+    
+    all_activities.sort()
+    
+    rapid_activities = 0
+    for i in range(1, len(all_activities)):
+        time_diff = (all_activities[i] - all_activities[i-1]).total_seconds()
+        if time_diff < 900:  # Less than 15 minutes between activities
+            rapid_activities += 1
+    
+    if len(all_activities) > 1:
+        rapid_ratio = rapid_activities / (len(all_activities) - 1)
+        if rapid_ratio > 0.7:
+            activity_velocity_risk = 3.0
+        elif rapid_ratio > 0.5:
+            activity_velocity_risk = 2.0
+        elif rapid_ratio > 0.3:
+            activity_velocity_risk = 1.0
+    
+    if rapid_activities >= 10:
+        activity_velocity_risk = max(activity_velocity_risk, 2.5)
+    elif rapid_activities >= 5:
+        activity_velocity_risk = max(activity_velocity_risk, 1.5)
+
+    content_risk_score += activity_velocity_risk
+
+    # Step 5: Apply Age Multiplier
+    if account_age_days < 7:
+        user_risk_score = content_risk_score * 1.5
+    elif account_age_days < 30:
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+    
+    # Step 6: Cap at max value of 5.0
+    user_risk_score = min(user_risk_score, 5.0)
+    
+    return user_risk_score
+
+# task 3.2.1: Function to identify top 5 highest risk users (how to test it though?)
+def get_top_5_risky_users():
+    """
+    Identifies the top 5 highest risk users based on the user_risk_analysis function.
+    """
+    # Get all users
+    users = query_db('SELECT id, username FROM users')
+    
+    # Calculate risk score for each user
+    user_risk_scores = []
+    for user in users:
+        risk_score = user_risk_analysis(user['id'])
+        user_risk_scores.append({
+            'user_id': user['id'],
+            'username': user['username'],
+            'risk_score': risk_score
+        })
+    
+    # Sort by risk score in descending order and get top 5
+    top_risky_users = sorted(user_risk_scores, key=lambda x: x['risk_score'], reverse=True)[:5]
+    
+    return top_risky_users
+    
+# Task 3.1
 def moderate_content(content):
     """
     Args
         content: the text content of a post or comment to be moderated.
         
     Returns: 
-        A tuple containing the moderated content (string) and a severity score (float). There are no strict rules or bounds to the severity score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk.
+        A tuple containing the moderated content (string) and a severity score (float). 
+        There are no strict rules or bounds to the severity score, other than that a score 
+        of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk 
+        and above 5.0 is high risk.
     
     This function moderates a string of content and calculates a severity score based on
-    rules loaded from the 'censorship.dat' file. These are already loaded as TIER1_WORDS, TIER2_PHRASES and TIER3_WORDS. Tier 1 corresponds to strong profanity, Tier 2 to scam/spam phrases and Tier 3 to mild profanity.
+    rules loaded from the 'censorship.dat' file. These are already loaded as TIER1_WORDS, 
+    TIER2_PHRASES and TIER3_WORDS. Tier 1 corresponds to strong profanity, Tier 2 to 
+    scam/spam phrases and Tier 3 to mild profanity.
     
     You will be able to check the scores by logging in with the administrator account:
             username: admin
@@ -932,11 +1039,57 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
+    # Rule 1.1.1: Tier 1 Words 
+    for word in content.split():
+            if word.lower() in TIER1_WORDS:
+                return "[content removed due to severe violation]", 5.0
+
+    # Rule 1.1.2: Tier 2 Phrases 
+    if content.casefold() in (phrase.casefold() for phrase in TIER2_PHRASES):
+        return "[content removed due to spam/scam policy]", 5.0
+
     moderated_content = content
     score = 0
-    
-    return moderated_content, score
 
+    # Rule 1.2.1: Tier 3 Words
+    for word in TIER3_WORDS:
+        pattern = r'\b' + re.escape(word) + r'\b'
+        matches = re.findall(pattern, moderated_content, re.IGNORECASE)
+        if matches:
+            score += len(matches) * 2.0
+            moderated_content = re.sub(pattern, 
+                                     lambda m: '*' * len(m.group(0)), 
+                                     moderated_content, 
+                                     flags=re.IGNORECASE)
+            
+    # Rule 1.2.2: External Links
+    url_pattern = r'https?://\S+|www\.\S+'
+    url_matches = re.findall(url_pattern, moderated_content, re.IGNORECASE)
+    if url_matches:
+        score += len(url_matches) * 2.0
+        moderated_content = re.sub(url_pattern, '[link removed]', moderated_content, flags=re.IGNORECASE)
+
+    # for word in content.split():
+    #     l = ''
+    #     uppers = [l for l in word if l.isupper()]
+    #     if len(word) >= 15 and len(uppers) >= int(0.7 * len(word)):
+    #         continue
+
+    # Rule 1.2.3: Excessive Capitalization
+    alpha_chars = [c for c in content if c.isalpha()] #check for actual char words, not numbers
+    if len(alpha_chars) > 15:
+        upper_chars = [c for c in alpha_chars if c.isupper()]
+        if len(upper_chars) / len(alpha_chars) > 0.7:
+            score += 0.5
+
+    # additional rule: check and censor social security number
+    ssn_pattern = r'\b(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])\d{2}[+\-A]\d{3}[0-9A-Y]\b'
+    ssn_matches = re.findall(ssn_pattern, moderated_content, re.IGNORECASE)
+    if ssn_matches:
+        score += len(ssn_matches) * 4.0
+        moderated_content = re.sub(ssn_pattern, '[ssn removed]', moderated_content, flags=re.IGNORECASE)
+
+    return moderated_content, score
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
