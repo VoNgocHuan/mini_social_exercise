@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, jsonify, abort, g, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
@@ -7,10 +7,13 @@ import sqlite3
 import hashlib
 import re
 from datetime import datetime, timedelta
+from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
 DATABASE = 'database.sqlite'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mini_social.db'
+db = SQLAlchemy(app)
 
 # Load censorship data
 # WARNING! The censorship.dat file contains disturbing language when decrypted. 
@@ -1177,6 +1180,78 @@ def moderate_content(content):
         moderated_content = re.sub(ssn_pattern, '[ssn removed]', moderated_content, flags=re.IGNORECASE)
 
     return moderated_content, score
+
+# additional for 4.4
+
+class Poll(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    question = db.Column(db.String(255), nullable=False)
+    options = db.Column(db.PickleType, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Vote(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    poll_id = db.Column(db.Integer, db.ForeignKey('poll.id'), nullable=False)
+    user_id = db.Column(db.String(100), nullable=False)
+    selected_option = db.Column(db.String(255), nullable=False)
+
+@app.route('/polls', methods=['GET', 'POST'])
+def polls():
+    if request.method == 'POST':
+        question = request.form['question']
+        options = request.form.getlist('options')
+
+        if question and options:
+            new_poll = Poll(question=question, options=options)
+            db.session.add(new_poll)
+            db.session.commit()
+            return redirect(url_for('polls'))
+
+    all_polls = Poll.query.all()
+    return render_template('polls.html', polls=all_polls)
+
+@app.route('/polls/<int:poll_id>', methods=['GET', 'POST'])
+def vote(poll_id):
+    poll = Poll.query.get_or_404(poll_id)
+
+    if request.method == 'POST':
+        user_id = session.get('user_id')
+        selected_option = request.form['selected_option']
+
+        existing_vote = Vote.query.filter_by(poll_id=poll_id, user_id=user_id).first()
+        if existing_vote:
+            flash('You have already voted on this poll.', 'warning')
+            return redirect(url_for('vote', poll_id=poll_id))
+
+        new_vote = Vote(poll_id=poll_id, user_id=user_id, selected_option=selected_option)
+        db.session.add(new_vote)
+        db.session.commit()
+
+        return redirect(url_for('vote', poll_id=poll_id))
+
+    votes = Vote.query.filter_by(poll_id=poll_id).all()
+    results = {option: 0 for option in poll.options}
+    for vote in votes:
+        results[vote.selected_option] += 1
+
+    return render_template('vote.html', poll=poll, results=results)
+
+@app.route('/polls/<int:poll_id>/reset', methods=['POST'])
+def reset_vote(poll_id):
+    user_id = session.get('user_id')
+
+    existing_vote = Vote.query.filter_by(poll_id=poll_id, user_id=user_id).first()
+    if existing_vote:
+        db.session.delete(existing_vote)
+        db.session.commit()
+        flash('Your vote has been reset. You can vote again.', 'success')
+    else:
+        flash('You have not voted on this poll yet.', 'warning')
+
+    return redirect(url_for('vote', poll_id=poll_id))
+
+with app.app_context():
+    db.create_all()
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

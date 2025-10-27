@@ -1,0 +1,31 @@
+{% extends "base.html.j2" %}
+
+{% block content %}
+<h1>{{ poll.question }}</h1>
+
+<form method="POST" action="/polls/{{ poll.id }}">
+    {% for option in poll.options %}
+    <div>
+        <input type="radio" id="option_{{ loop.index }}" name="selected_option" value="{{ option }}" required>
+        <label for="option_{{ loop.index }}">{{ option }}</label>
+    </div>
+    {% endfor %}
+
+    <button type="submit">Vote</button>
+</form>
+
+<form method="POST" action="/polls/{{ poll.id }}/reset">
+    <button type="submit" style="margin-top: 10px;">Reset Vote</button>
+</form>
+
+<hr>
+<h2>Results:</h2>
+<ul>
+    {% for option, count in results.items() %}
+    <li>{{ option }}: {{ count }} votes</li>
+    {% endfor %}
+</ul>
+
+<a href="/polls">Back to Polls</a>
+
+{% endblock %}
